@@ -19,14 +19,14 @@ from dm_env import specs
 import wandb
 
 # import dmc
-import utils
-from utils import ExtendedTimeStep
+import drqbc.utils as utils
+from drqbc.utils import ExtendedTimeStep
 from dm_env import StepType
-from logger import Logger
-from numpy_replay_buffer import EfficientReplayBuffer
+from drqbc.logger import Logger
+from drqbc.numpy_replay_buffer import EfficientReplayBuffer
 # from video import TrainVideoRecorder, VideoRecorder
 from cdmc.video import VideoRecorder
-from utils import load_offline_dataset_into_buffer
+from drqbc.utils import load_offline_dataset_into_buffer
 
 from cdmc.env.wrappers import make_env
 

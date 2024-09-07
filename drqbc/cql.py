@@ -8,8 +8,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-import utils
-from drqv2 import Actor, Critic, Encoder, RandomShiftsAug, NoShiftAug
+import drqbc.utils as utils
+from drqbc.drqv2 import Actor, Critic, Encoder, RandomShiftsAug, NoShiftAug
 
 
 class CQLAgent:

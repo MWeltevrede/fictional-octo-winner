@@ -7,8 +7,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from drqv2 import Actor, Encoder, RandomShiftsAug
-import utils
+from drqbc.drqv2 import Actor, Encoder, RandomShiftsAug
+import drqbc.utils as utils
 
 
 class BCAgent:
