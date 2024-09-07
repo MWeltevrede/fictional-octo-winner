@@ -6,14 +6,14 @@ defaults:
 
 # task settings
 frame_stack: 3
-action_repeat: 2
+action_repeat: 4
 discount: 0.99
 distracting_mode: null
 # train settings
 num_seed_frames: 4000
 # eval
 eval_every_frames: 10000
-num_eval_episodes: 10
+num_eval_episodes: 20
 eval_on_distracting: False
 eval_on_multitask: False
 eval_save_vid_every_step: 100000
@@ -29,7 +29,7 @@ seed: 1
 device: cuda
 save_video: True
 save_train_video: False
-use_tb: True
+use_tb: False
 # experiment
 experiment: exp
 # agent
