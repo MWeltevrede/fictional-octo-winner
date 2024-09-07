@@ -5,11 +5,11 @@
 import random
 import re
 import time
+from typing import Any, NamedTuple, Union
 
 import numpy as np
 import h5py
 from collections import deque
-import dmc
 from dm_env import StepType
 from drqbc.numpy_replay_buffer import EfficientReplayBuffer
 
@@ -18,6 +18,24 @@ import torch.nn as nn
 from torch import distributions as pyd
 from torch.distributions.utils import _standard_normal
 
+class ExtendedTimeStep(NamedTuple):
+    step_type: Any
+    reward: Any
+    discount: Any
+    observation: Any
+    action: Any
+
+    def first(self):
+        return self.step_type == StepType.FIRST
+
+    def mid(self):
+        return self.step_type == StepType.MID
+
+    def last(self):
+        return self.step_type == StepType.LAST
+
+    def __getitem__(self, attr):
+        return getattr(self, attr)
 
 class eval_mode:
     def __init__(self, *models):
@@ -198,7 +216,7 @@ def add_offline_data_to_buffer(offline_data: dict, replay_buffer: EfficientRepla
 
 
 def get_timestep_from_idx(offline_data: dict, idx: int):
-    return dmc.ExtendedTimeStep(
+    return ExtendedTimeStep(
         step_type=step_type_lookup[offline_data['step_type'][idx]],
         reward=offline_data['reward'][idx],
         observation=offline_data['observation'][idx],

@@ -10,7 +10,7 @@ import numpy as np
 import torch
 # import torchvision
 from termcolor import colored
-from torch.utils.tensorboard import SummaryWriter
+import wandb
 
 COMMON_TRAIN_FORMAT = [('frame', 'F', 'int'), ('step', 'S', 'int'),
                        ('episode', 'E', 'int'), ('episode_length', 'L', 'int'),
@@ -26,33 +26,6 @@ COMMON_EVAL_FORMAT = [('frame', 'F', 'int'), ('step', 'S', 'int'),
                       ('episode_reward', 'R', 'float'),
                       ('total_time', 'T', 'time')]
 
-DISTRACTING_EVAL_FORMAT = [('frame', 'F', 'int'), ('step', 'S', 'int'),
-                           ('episode', 'E', 'int'), ('episode_length', 'L', 'int'),
-                           ('episode_reward', 'R', 'float'),
-                           ('easy_episode_reward', 'EER', 'float'),
-                           ('medium_episode_reward', 'MER', 'float'),
-                           ('hard_episode_reward', 'HER', 'float'),
-                           ('fixed_easy_episode_reward', 'FEER', 'float'),
-                           ('fixed_medium_episode_reward', 'FMER', 'float'),
-                           ('fixed_hard_episode_reward', 'FHER', 'float'),
-                           ('total_time', 'T', 'time')]
-
-MULTITASK_EVAL_FORMAT = [('frame', 'F', 'int'), ('step', 'S', 'int'),
-                         ('episode', 'E', 'int'), ('episode_length', 'L', 'int'),
-                         ('episode_reward', 'R', 'float'),
-                         ('len1_episode_reward', 'R1', 'float'),
-                         ('len2_episode_reward', 'R2', 'float'),
-                         ('len3_episode_reward', 'R3', 'float'),
-                         ('len4_episode_reward', 'R4', 'float'),
-                         ('len5_episode_reward', 'R5', 'float'),
-                         ('len6_episode_reward', 'R6', 'float'),
-                         ('len7_episode_reward', 'R7', 'float'),
-                         ('len8_episode_reward', 'R8', 'float'),
-                         ('len9_episode_reward', 'R9', 'float'),
-                         ('len10_episode_reward', 'R10', 'float'),
-                         ('total_time', 'T', 'time')]
-
-
 class AverageMeter(object):
     def __init__(self):
         self._sum = 0
@@ -67,12 +40,13 @@ class AverageMeter(object):
 
 
 class MetersGroup(object):
-    def __init__(self, csv_file_name, formating):
+    def __init__(self, csv_file_name, formating, use_wandb=True):
         self._csv_file_name = csv_file_name
         self._formating = formating
         self._meters = defaultdict(AverageMeter)
         self._csv_file = None
         self._csv_writer = None
+        self._use_wandb = use_wandb
 
     def log(self, key, value, n=1):
         self._meters[key].update(value, n)
@@ -104,23 +78,6 @@ class MetersGroup(object):
             for row in rows:
                 writer.writerow(row)
 
-    def _dump_to_csv(self, data):
-        if self._csv_writer is None:
-            should_write_header = True
-            if self._csv_file_name.exists():
-                self._remove_old_entries(data)
-                should_write_header = False
-
-            self._csv_file = self._csv_file_name.open('a')
-            self._csv_writer = csv.DictWriter(self._csv_file,
-                                              fieldnames=sorted(data.keys()),
-                                              restval=0.0)
-            if should_write_header:
-                self._csv_writer.writeheader()
-
-        self._csv_writer.writerow(data)
-        self._csv_file.flush()
-
     def _format(self, key, value, ty):
         if ty == 'int':
             value = int(value)
@@ -141,21 +98,28 @@ class MetersGroup(object):
             pieces.append(self._format(disp_key, value, ty))
         print(' | '.join(pieces))
 
+    def _dump_to_wandb(self, data, step, prefix):
+         data = {prefix + '/' + key: val for key, val in data.items()}
+         wandb.log(data, step)
+
     def dump(self, step, prefix):
         if len(self._meters) == 0:
             return
         data = self._prime_meters()
         if 'frame' in data:
             data['frame'] = step
-        self._dump_to_csv(data)
+        # self._dump_to_csv(data)
         self._dump_to_console(data, prefix)
+        if self._use_wandb:
+            self._dump_to_wandb(data, step, prefix)
         self._meters.clear()
 
 
 class Logger(object):
     def __init__(self, log_dir, use_tb, offline=False, distracting_eval=False, multitask_eval=False):
         self._log_dir = log_dir
-        train_formatting = OFFLINE_TRAIN_FORMAT if offline else COMMON_TRAIN_FORMAT
+        # train_formatting = OFFLINE_TRAIN_FORMAT if offline else COMMON_TRAIN_FORMAT
+        train_formatting = COMMON_TRAIN_FORMAT
         if distracting_eval:
             eval_formatting = DISTRACTING_EVAL_FORMAT
         elif multitask_eval:
@@ -167,7 +131,8 @@ class Logger(object):
         self._eval_mg = MetersGroup(log_dir / 'eval.csv',
                                     formating=eval_formatting)
         if use_tb:
-            self._sw = SummaryWriter(str(log_dir / 'tb'))
+            # self._sw = SummaryWriter(str(log_dir / 'tb'))
+            self._sw = None
         else:
             self._sw = None
 

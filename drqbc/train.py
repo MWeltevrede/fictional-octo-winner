@@ -7,22 +7,28 @@ import warnings
 warnings.filterwarnings('ignore', category=DeprecationWarning)
 
 import os
+import json
 
-os.environ['MKL_SERVICE_FORCE_INTEL'] = '1'
-os.environ['MUJOCO_GL'] = 'egl'
+from pyvirtualdisplay import Display  
 
 from pathlib import Path
-import hydra
+import hydra, omegaconf
 import numpy as np
 import torch
 from dm_env import specs
+import wandb
 
-import dmc
+# import dmc
 import utils
+from utils import ExtendedTimeStep
+from dm_env import StepType
 from logger import Logger
 from numpy_replay_buffer import EfficientReplayBuffer
-from video import TrainVideoRecorder, VideoRecorder
+# from video import TrainVideoRecorder, VideoRecorder
+from cdmc.video import VideoRecorder
 from utils import load_offline_dataset_into_buffer
+
+from cdmc.env.wrappers import make_env
 
 torch.backends.cudnn.benchmark = True
 
@@ -43,7 +49,7 @@ class Workspace:
         self.device = torch.device(cfg.device)
         self.setup()
 
-        self.agent = make_agent(self.train_env.observation_spec(),
+        self.agent = make_agent(self.train_env.observation_space,
                                 self.train_env.action_spec(),
                                 self.cfg.agent)
         self.timer = utils.Timer()
@@ -55,10 +61,38 @@ class Workspace:
         self.logger = Logger(self.work_dir, use_tb=self.cfg.use_tb, offline=self.cfg.offline,
                              distracting_eval=self.cfg.eval_on_distracting, multitask_eval=self.cfg.eval_on_multitask)
         # create envs
-        self.train_env = dmc.make(self.cfg.task_name, self.cfg.frame_stack,
-                                  self.cfg.action_repeat, self.cfg.seed, self.cfg.distracting_mode)
-        self.eval_env = dmc.make(self.cfg.task_name, self.cfg.frame_stack,
-                                 self.cfg.action_repeat, self.cfg.seed, self.cfg.distracting_mode)
+        with open(f'{self.cfg.train_context_name}.json', 'r') as file:
+            train_contexts = json.load(file)
+        self.train_env = make_env(
+            domain_name=self.cfg.domain_name,
+            task_name=self.cfg.task_name,
+            seed=self.cfg.seed,
+            episode_length=1000,
+            action_repeat=self.cfg.action_repeat,
+            frame_stack=self.cfg.frame_stack,
+            image_size=84,
+            states=train_contexts['states'],
+            video_paths=train_contexts['video_paths'],
+            colors=[dict([(k, np.array(v)) for k,v in color_dict.items()]) for color_dict in train_contexts['colors']],
+            from_pixels=True,
+        )
+        with open(f'{self.cfg.test_context_name}.json', 'r') as file:
+            test_contexts = json.load(file)
+        self.eval_env = make_env(
+            domain_name=self.cfg.domain_name,
+            task_name=self.cfg.task_name,
+            seed=self.cfg.seed,
+            episode_length=1000,
+            action_repeat=self.cfg.action_repeat,
+            frame_stack=self.cfg.frame_stack,
+            image_size=84,
+            states=test_contexts['states'],
+            video_paths=test_contexts['video_paths'],
+            colors=[dict([(k, np.array(v)) for k,v in color_dict.items()]) for color_dict in test_contexts['colors']],
+            from_pixels=True,
+        )
+
+
         # create replay buffer
         data_specs = (self.train_env.observation_spec(),
                       self.train_env.action_spec(),
@@ -74,11 +108,6 @@ class Workspace:
 
         self.video_recorder = VideoRecorder(
             self.work_dir if self.cfg.save_video else None)
-        self.train_video_recorder = TrainVideoRecorder(
-            self.work_dir if self.cfg.save_train_video else None)
-
-        self.eval_on_distracting = self.cfg.eval_on_distracting
-        self.eval_on_multitask = self.cfg.eval_on_multitask
 
     @property
     def global_step(self):
@@ -92,150 +121,45 @@ class Workspace:
     def global_frame(self):
         return self.global_step * self.cfg.action_repeat
 
-    def eval(self):
+    def eval(self, train=True):
+        if train:
+            _env = self.train_env
+            ty = 'train'
+        else:
+            _env = self.eval_env
+            ty = 'eval'
         step, episode, total_reward = 0, 0, 0
         eval_until_episode = utils.Until(self.cfg.num_eval_episodes)
 
         while eval_until_episode(episode):
-            time_step = self.eval_env.reset()
-            self.video_recorder.init(self.eval_env, enabled=(episode == 0))
+            obs = np.array(_env.reset())
+            action_spec = _env.action_spec()
+            action = np.zeros(action_spec.shape, dtype=action_spec.dtype)
+            time_step = ExtendedTimeStep(StepType.FIRST, 0.0, 1.0, obs, action)
+            enable_videorecorder = (episode == 0) and (self.global_step % (self.cfg.eval_save_vid_every_step // self.cfg.action_repeat) == 0)
+            self.video_recorder.init(enabled=enable_videorecorder)
             while not time_step.last():
                 with torch.no_grad(), utils.eval_mode(self.agent):
                     action = self.agent.act(time_step.observation,
                                             self.global_step,
                                             eval_mode=True)
-                time_step = self.eval_env.step(action)
-                self.video_recorder.record(self.eval_env)
+                    
+                obs, reward, done, _ = _env.step(action)
+                obs = np.array(obs)
+                step_type = StepType.LAST if done else StepType.MID
+                time_step = ExtendedTimeStep(step_type, reward, 1.0, obs, action)
+                self.video_recorder.record(_env)
                 total_reward += time_step.reward
                 step += 1
 
             episode += 1
-            self.video_recorder.save(f'{self.global_frame}.mp4')
+            self.video_recorder.save(f'{ty}_{self.global_frame}.mp4')
 
-        with self.logger.log_and_dump_ctx(self.global_frame, ty='eval') as log:
+        with self.logger.log_and_dump_ctx(self.global_frame, ty=ty) as log:
             log('episode_reward', total_reward / episode)
             log('episode_length', step * self.cfg.action_repeat / episode)
             log('episode', self.global_episode)
             log('step', self.global_step)
-
-    def eval_distracting(self, record_video):
-        distraction_modes = ['easy', 'medium', 'hard', 'fixed_easy', 'fixed_medium', 'fixed_hard']
-        if not hasattr(self, 'distracting_envs'):
-            self.distracting_envs = []
-            for distraction_mode in distraction_modes:
-                env = dmc.make(self.cfg.task_name, self.cfg.frame_stack,
-                               self.cfg.action_repeat, self.cfg.seed, distracting_mode=distraction_mode)
-                self.distracting_envs.append(env)
-        for env, env_name in zip(self.distracting_envs, distraction_modes):
-            self.eval_single_env(env, env_name, record_video)
-
-    def eval_multitask(self, record_video):
-        multitask_modes = [f'len_{i}' for i in range(1, 11, 1)]
-        if not hasattr(self, 'multitask_envs'):
-            self.multitask_envs = []
-            for multitask_mode in multitask_modes:
-                env = dmc.make(self.cfg.task_name, self.cfg.frame_stack,
-                               self.cfg.action_repeat, self.cfg.seed, multitask_mode=multitask_mode)
-                self.multitask_envs.append(env)
-        for env, env_name in zip(self.multitask_envs, multitask_modes):
-            self.eval_single_env(env, env_name, record_video)
-
-    def eval_single_env(self, env, env_name, save_video):
-        step, episode, total_reward = 0, 0, 0
-        eval_until_episode = utils.Until(self.cfg.num_eval_episodes)
-
-        while eval_until_episode(episode):
-            time_step = env.reset()
-            self.video_recorder.init(env, enabled=((episode == 0) and save_video))
-            while not time_step.last():
-                with torch.no_grad(), utils.eval_mode(self.agent):
-                    action = self.agent.act(time_step.observation,
-                                            self.global_step,
-                                            eval_mode=True)
-                time_step = env.step(action)
-                self.video_recorder.record(env)
-                total_reward += time_step.reward
-                step += 1
-
-            episode += 1
-            self.video_recorder.save(f'{env_name}_{self.global_frame}.mp4')
-
-        self.logger.log(f'eval/{env_name}_episode_reward', total_reward / episode, self.global_frame)
-
-    def train(self):
-        # predicates
-        train_until_step = utils.Until(self.cfg.num_train_frames,
-                                       self.cfg.action_repeat)
-        seed_until_step = utils.Until(self.cfg.num_seed_frames,
-                                      self.cfg.action_repeat)
-        eval_every_step = utils.Every(self.cfg.eval_every_frames,
-                                      self.cfg.action_repeat)
-        # only in distracting evaluation mode
-        eval_save_vid_every_step = utils.Every(self.cfg.eval_save_vid_every_step,
-                                               self.cfg.action_repeat)
-
-        episode_step, episode_reward = 0, 0
-        time_step = self.train_env.reset()
-        self.replay_storage.add(time_step)
-        self.train_video_recorder.init(time_step.observation)
-        metrics = None
-        while train_until_step(self.global_step):
-            if time_step.last():
-                self._global_episode += 1
-                self.train_video_recorder.save(f'{self.global_frame}.mp4')
-                # wait until all the metrics schema is populated
-                if metrics is not None:
-                    # log stats
-                    elapsed_time, total_time = self.timer.reset()
-                    episode_frame = episode_step * self.cfg.action_repeat
-                    with self.logger.log_and_dump_ctx(self.global_frame,
-                                                      ty='train') as log:
-                        log('fps', episode_frame / elapsed_time)
-                        log('total_time', total_time)
-                        log('episode_reward', episode_reward)
-                        log('episode_length', episode_frame)
-                        log('episode', self.global_episode)
-                        log('buffer_size', len(self.replay_storage))
-                        log('step', self.global_step)
-
-                # reset env
-                time_step = self.train_env.reset()
-                self.replay_storage.add(time_step)
-                self.train_video_recorder.init(time_step.observation)
-                # try to save snapshot
-                if self.cfg.save_snapshot:
-                    self.save_snapshot()
-                episode_step = 0
-                episode_reward = 0
-
-            # try to evaluate
-            if eval_every_step(self.global_step):
-                self.logger.log('eval_total_time', self.timer.total_time(),
-                                self.global_frame)
-                if self.eval_on_distracting:
-                    self.eval_distracting(eval_save_vid_every_step(self.global_step))
-                if self.eval_on_multitask:
-                    self.eval_multitask(eval_save_vid_every_step(self.global_step))
-                self.eval()
-
-            # sample action
-            with torch.no_grad(), utils.eval_mode(self.agent):
-                action = self.agent.act(time_step.observation,
-                                        self.global_step,
-                                        eval_mode=False)
-
-            # try to update the agent
-            if not seed_until_step(self.global_step):
-                metrics = self.agent.update(self.replay_iter, self.global_step)
-                self.logger.log_metrics(metrics, self.global_frame, ty='train')
-
-            # take env step
-            time_step = self.train_env.step(action)
-            episode_reward += time_step.reward
-            self.replay_storage.add(time_step)
-            self.train_video_recorder.record(time_step.observation)
-            episode_step += 1
-            self._global_step += 1
 
     def train_offline(self, offline_dir):
         # Open dataset, load as memory buffer
@@ -276,11 +200,12 @@ class Workspace:
             if eval_every_step(self.global_step):
                 self.logger.log('eval_total_time', self.timer.total_time(),
                                 self.global_frame)
-                if self.eval_on_distracting:
-                    self.eval_distracting(eval_save_vid_every_step(self.global_step))
-                if self.eval_on_multitask:
-                    self.eval_multitask(eval_save_vid_every_step(self.global_step))
-                self.eval()
+                # if self.eval_on_distracting:
+                #     self.eval_distracting(eval_save_vid_every_step(self.global_step))
+                # if self.eval_on_multitask:
+                #     self.eval_multitask(eval_save_vid_every_step(self.global_step))
+                self.eval(train=True)
+                self.eval(train=False)
 
             # try to update the agent
             metrics = self.agent.update(self.replay_buffer, self.global_step)
@@ -306,19 +231,30 @@ class Workspace:
 
 @hydra.main(config_path='cfgs', config_name='config')
 def main(cfg):
-    from train import Workspace as W
-    root_dir = Path.cwd()
-    workspace = W(cfg)
-    print(cfg)
-    snapshot = root_dir / 'snapshot.pt'
-    if snapshot.exists():
-        print(f'resuming: {snapshot}')
-        workspace.load_snapshot()
-    if cfg.offline:
-        workspace.train_offline(cfg.offline_dir)
-    else:
-        workspace.train()
+    with open("/home/max/Documents/phd/offline/fictional-octo-winner/wandb_info.txt") as file:
+        lines = [line.rstrip() for line in file]
+        os.environ["WANDB_API_KEY"] = lines[0]
+        os.environ["WANDB_START_METHOD"] = "thread"
+        wandb_project = "OfflineRLBenchmark"
+
+    config = omegaconf.OmegaConf.to_container(
+        cfg, resolve=True, throw_on_missing=False
+    )
+    train_context_name_short = os.path.split(cfg.train_context_name)[-1]
+    config['train_context_name_short'] = '_'.join(train_context_name_short.split('_')[:-1])
+    with wandb.init(project=wandb_project, entity=lines[1], config=config, tags=[cfg.experiment, f"{cfg.domain_name}_{cfg.task_name}", ]):
+        from train import Workspace as W
+        root_dir = Path.cwd()
+        workspace = W(cfg)
+        print(cfg)
+        snapshot = root_dir / 'snapshot.pt'
+        if snapshot.exists():
+            print(f'resuming: {snapshot}')
+            workspace.load_snapshot()
+        if cfg.offline:
+            workspace.train_offline(cfg.offline_dir)
 
 
 if __name__ == '__main__':
-    main()
+    with Display(visible=False) as disp:
+        main()
