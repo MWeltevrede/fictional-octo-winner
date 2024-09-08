@@ -243,7 +243,7 @@ def main(cfg):
     train_context_name_short = os.path.split(cfg.train_context_name)[-1]
     config['train_context_name_short'] = '_'.join(train_context_name_short.split('_')[:-1])
     with wandb.init(project=wandb_project, entity=lines[1], config=config, tags=[cfg.experiment, f"{cfg.domain_name}_{cfg.task_name}", ]):
-        from train import Workspace as W
+        from drqbc.train import Workspace as W
         root_dir = Path.cwd()
         workspace = W(cfg)
         print(cfg)
