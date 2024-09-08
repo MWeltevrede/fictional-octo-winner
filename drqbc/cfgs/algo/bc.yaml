@@ -5,7 +5,7 @@ defaults:
 experiment: bc
 
 agent:
-  _target_: bcagent.BCAgent
+  _target_: drqbc.bcagent.BCAgent
   obs_shape: ??? # to be specified later
   action_shape: ??? # to be specified later
   device: ${device}

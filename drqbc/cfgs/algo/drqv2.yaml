@@ -5,7 +5,7 @@ defaults:
 experiment: drqv2
 
 agent:
-  _target_: drqv2.DrQV2Agent
+  _target_: drqbc.drqv2.DrQV2Agent
   obs_shape: ??? # to be specified later
   action_shape: ??? # to be specified later
   device: ${device}

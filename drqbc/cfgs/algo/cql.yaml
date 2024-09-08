@@ -5,7 +5,7 @@ defaults:
 experiment: cql
 
 agent:
-  _target_: cql.CQLAgent
+  _target_: drqbc.cql.CQLAgent
   obs_shape: ??? # to be specified later
   action_shape: ??? # to be specified later
   device: ${device}
